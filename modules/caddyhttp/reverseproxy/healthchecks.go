@@ -430,8 +430,11 @@ func (h *Handler) doActiveHealthCheck(dialInfo DialInfo, hostAddr string, networ
 	// if body is provided, create a reader for it, otherwise nil
 	var requestBody io.Reader
 	if h.HealthChecks.Active.Body != "" {
-		// set body, using replacer
-		requestBody = strings.NewReader(repl.ReplaceAll(h.HealthChecks.Active.Body, ""))
+		// set body, using replacer; ReplaceKnown (not ReplaceAll) so a literal
+		// body such as JSON is preserved instead of being treated as an
+		// unknown placeholder and replaced with the empty string (#7021),
+		// matching how header values are handled below.
+		requestBody = strings.NewReader(repl.ReplaceKnown(h.HealthChecks.Active.Body, ""))
 	}
 
 	// attach dialing information to this request, as well as context values that
