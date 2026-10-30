@@ -148,13 +148,11 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhtt
 
 			// evaluate regular expression if configured
 			if m.re != nil {
-				var result []byte
 				matches := m.re.FindStringSubmatchIndex(input)
 				if matches == nil {
 					continue
 				}
-				result = m.re.ExpandString(result, outputStr, input, matches)
-				return string(result), true
+				return expandRegexpOutput(repl, m.re, outputStr, input, matches), true
 			}
 
 			// otherwise simple string comparison
@@ -172,6 +170,46 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhtt
 	})
 
 	return next.ServeHTTP(w, r)
+}
+
+// captureRef matches what regexp.Expand treats specially in a template:
+// "$$", "${name}", "$name", and a lone '$', which is literal.
+var captureRef = regexp.MustCompile(`\$(\$|\{[\p{L}\p{Nd}_]+\}|[\p{L}\p{Nd}_]+)?`)
+
+// expandRegexpOutput fills in the output of a regexp mapping. Configured
+// placeholders are replaced before the captures are inserted, so captured
+// input is never evaluated as a placeholder. Capture references are braced
+// (with the braces escaped from the replacer) so placeholder values cannot
+// merge into them, a lone '$' is kept literal, and '$' in placeholder values
+// is escaped so a value is never read as a capture reference.
+func expandRegexpOutput(repl *caddy.Replacer, re *regexp.Regexp, output, input string, matches []int) string {
+	if !strings.Contains(output, "$") {
+		return repl.ReplaceAll(output, "")
+	}
+	var tmpl strings.Builder
+	last := 0
+	for _, loc := range captureRef.FindAllStringIndex(output, -1) {
+		tmpl.WriteString(output[last:loc[0]])
+		ref, rest := output[loc[0]:loc[1]], output[loc[1]:]
+		last = loc[1]
+		switch name := strings.Trim(ref[1:], "{}"); {
+		case ref == "$$":
+			tmpl.WriteString(ref)
+		case name == "":
+			tmpl.WriteString("$$")
+		case rest == "" || rest[0] == '}':
+			// Nothing can merge into the reference here, and a '}' may end a
+			// placeholder name such as {http.request.uri.query.$filter}.
+			tmpl.WriteString("$" + name)
+		default:
+			tmpl.WriteString(`$\{` + name + `\}`)
+		}
+	}
+	tmpl.WriteString(output[last:])
+	template, _ := repl.ReplaceFunc(tmpl.String(), func(_ string, val any) (any, error) {
+		return strings.ReplaceAll(caddy.ToString(val), "$", "$$"), nil
+	})
+	return string(re.ExpandString(nil, template, input, matches))
 }
 
 // Mapping describes a mapping from input to outputs.

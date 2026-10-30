@@ -228,3 +228,119 @@ func TestHandler(t *testing.T) {
 		}
 	}
 }
+
+func TestHandlerRegexpOutputPlaceholders(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		reqURI string
+		regexp string
+		output string
+		expect string
+	}{
+		{
+			name:   "placeholder and capture",
+			reqURI: "/abc",
+			regexp: "^/(abc)$",
+			output: "{testvar}-${1}",
+			expect: "testing-abc",
+		},
+		{
+			name:   "named capture",
+			reqURI: "/abc",
+			regexp: "^/(?P<word>abc)$",
+			output: "${word}/{testvar}",
+			expect: "abc/testing",
+		},
+		{
+			name:   "captured braces are not evaluated",
+			reqURI: "/%7Btestvar%7D",
+			regexp: "^/(.*)$",
+			output: "[$1] [${1}]",
+			expect: "[{testvar}] [{testvar}]",
+		},
+		{
+			name:   "placeholder value is not a capture reference",
+			reqURI: "/abc",
+			regexp: "^/(abc)$",
+			output: "{dollar}:${1}",
+			expect: "$1 ${1}:abc",
+		},
+		{
+			name:   "bare capture before placeholder",
+			reqURI: "/abc",
+			regexp: "^/(abc)$",
+			output: "$1{testvar}",
+			expect: "abctesting",
+		},
+		{
+			name:   "lone dollar before placeholder",
+			reqURI: "/abc",
+			regexp: "^/(abc)$",
+			output: "$-${1}-${test.dotted}",
+			expect: "$-abc-$dotted",
+		},
+		{
+			name:   "escaped dollar",
+			reqURI: "/abc",
+			regexp: "^/(abc)$",
+			output: "$$1={testvar}",
+			expect: "$1=testing",
+		},
+		{
+			name:   "unclosed brace before capture",
+			reqURI: "/abc",
+			regexp: "^/(abc)$",
+			output: "{$1",
+			expect: "{abc",
+		},
+		{
+			name:   "dollar in placeholder name",
+			reqURI: "/abc?%24filter=qv",
+			regexp: "^/(abc)$",
+			output: "{http.request.uri.query.$filter}",
+			expect: "qv",
+		},
+		{
+			name:   "documented capture syntax",
+			reqURI: "/abc",
+			regexp: "^/(abc)$",
+			output: "${1} subdomain",
+			expect: "abc subdomain",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := Handler{
+				Source:       "{http.request.uri.path}",
+				Destinations: []string{"{output}"},
+				Mappings: []Mapping{
+					{
+						InputRegexp: tc.regexp,
+						Outputs:     []any{tc.output},
+					},
+				},
+			}
+			if err := h.Provision(caddy.Context{}); err != nil {
+				t.Fatalf("Provisioning handler: %v", err)
+			}
+
+			req, err := http.NewRequest(http.MethodGet, tc.reqURI, nil)
+			if err != nil {
+				t.Fatalf("Creating request: %v", err)
+			}
+			repl := caddyhttp.NewTestReplacer(req)
+			repl.Set("testvar", "testing")
+			repl.Set("dollar", "$1 ${1}")
+			repl.Set("test.dotted", "dotted")
+			req = req.WithContext(context.WithValue(req.Context(), caddy.ReplacerCtxKey, repl))
+
+			noop := caddyhttp.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) error { return nil })
+			if err := h.ServeHTTP(httptest.NewRecorder(), req, noop); err != nil {
+				t.Fatalf("Handler returned error: %v", err)
+			}
+
+			if actual, _ := repl.GetString("output"); actual != tc.expect {
+				t.Errorf("expected %q but got %q", tc.expect, actual)
+			}
+		})
+	}
+}
